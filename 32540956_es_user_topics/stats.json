@@ -1,0 +1,77 @@
+{
+  "aggs": {
+    "_shards": {
+      "failed": 0, 
+      "successful": 4, 
+      "total": 4
+    }, 
+    "aggregations": {
+      "distinct_topics": {
+        "value": 22558
+      }, 
+      "topic_percentiles": {
+        "values": {
+          "25.0": 3.0, 
+          "5.0": 1.0, 
+          "50.0": 6.0, 
+          "75.0": 13.0, 
+          "95.0": 31.0, 
+          "99.0": 55.00011997613636, 
+          "99.9": 105.34348730964811
+        }
+      }, 
+      "topic_stats": {
+        "avg": 10.05298295, 
+        "count": 20000000, 
+        "max": 626.0, 
+        "min": 1.0, 
+        "std_deviation": 11.484354712260036, 
+        "std_deviation_bounds": {
+          "lower": -12.91572647452007, 
+          "upper": 33.02169237452007
+        }, 
+        "sum": 201059659.0, 
+        "sum_of_squares": 4659057387.0, 
+        "variance": 131.8904031570093
+      }
+    }, 
+    "hits": {
+      "hits": [], 
+      "max_score": 0.0, 
+      "total": 20000000
+    }, 
+    "timed_out": false, 
+    "took": 10257
+  }, 
+  "doc": {
+    "_shards": {
+      "failed": 0, 
+      "successful": 4, 
+      "total": 4
+    }, 
+    "hits": {
+      "hits": [
+        {
+          "_id": "8115834871142234957", 
+          "_index": "user_topics", 
+          "_score": 1.0, 
+          "_source": {
+            "n_topics": 5, 
+            "topics": [
+              814, 
+              296, 
+              781, 
+              118, 
+              142
+            ]
+          }, 
+          "_type": "user"
+        }
+      ], 
+      "max_score": 1.0, 
+      "total": 20000000
+    }, 
+    "timed_out": false, 
+    "took": 41
+  }
+}

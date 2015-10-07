@@ -1,0 +1,30 @@
+{
+  "size": 0,
+  "aggs": {
+    "topic_percentiles": {
+      "percentiles": {
+        "field": "n_topics",
+        "percents": [
+          5,
+          25,
+          50,
+          75,
+          95,
+          99,
+          99.9
+        ]
+      }
+    },
+    "topic_stats": {
+      "extended_stats": {
+        "field": "n_topics"
+      }
+    },
+    "distinct_topics": {
+      "cardinality": {
+        "field": "topics",
+        "precision_threshold": 100000
+      }
+    }
+  }
+}
