@@ -1,7 +1,19 @@
+# Whitelist-mode
 *
 !*/
-!*.py
+
+# GitHub and generic
 !*.md
 !*.sh
 !*.json
 !.gitignore
+
+# Python
+!*.py
+
+# C++ stuff
+!*.cpp
+!*.hpp
+!*.sln
+!*.vcxproj
+!*.cu

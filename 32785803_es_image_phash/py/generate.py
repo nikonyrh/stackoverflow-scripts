@@ -8,14 +8,21 @@ import time
 import sys
 
 dim_in   = 32
-dim_rand = 24  # Number of "clusters" is about 2^(dim_in - dim_rand)
+dim_rand = 25  # Number of "clusters" is about 2^(dim_in - dim_rand)
 dim_out  = 64
+
+n_samples  = 64
+b_p_sample = 16
 
 rand_scale = 1e-2
 
+# Make projections deterministic
+np.random.seed(seed=123)
 proj = np.random.randn(dim_in, dim_out)
 proj[0:dim_rand,:] *= rand_scale
 
+# Make generated document unique
+np.random.seed(seed=int(time.time()))
 
 def get_sampler(n_samples, bits_per_sample):
     result = np.zeros((dim_out,bits_per_sample,n_samples), dtype=np.uint64)
@@ -32,34 +39,34 @@ def get_sampler(n_samples, bits_per_sample):
         
         result[ind1,ind2,i] = 1;
     
+    # Ah damn, maybe this should have been in a reverse order :P
+    # But I am too lazy to re-generate all data to ES
     pow2 = 2**np.arange(bits_per_sample).astype(np.uint64)
     return result, pow2
 
 
-def main():
-    n_out      = int(1e6)
-    n_batch    = int(2e2)
+def main(index_num):
+    n_out      = int(10e6)
+    n_batch    = int(4e3)
     n_batches  = n_out // n_batch
-    n_samples  = 1024
-    b_p_sample = 16
-    index      = 'image_hashes_04'
+    index      = 'image_hashes_%02d' % index_num
     
     client = Elasticsearch('localhost:9200')
     index_client = IndicesClient(client)
     
     if index_client.exists(index):
-        print('Not deleting %s!' % index); return
+        print('Not deleting %s!' % index); return; sys.exit(1)
         index_client.delete(index)
     
     es_short = {
         'type': 'short',
-        'doc_values': True
     }
     
     field_name = lambda i: '%x' % i
     fields = {field_name(i): es_short for i in range(n_samples)}
     fields['raw'] = {
         'type': 'string',
+        'store': True,
         'index': 'not_analyzed',
         'doc_values': True
     }
@@ -71,6 +78,7 @@ def main():
         },
         'mappings': {
             'images': {
+                '_source': {'enabled': False},
                 'properties': fields
             }
         }
@@ -83,6 +91,7 @@ def main():
         data = np.random.randn(n_batch, dim_in)
         hash = (data.dot(proj) > 0).astype(np.uint64)
         hash_int = hash.dot(2**np.arange(dim_out).astype(np.uint64))
+		
         #print('\n'.join(repr(i.astype(np.uint8)) for i in hash)); return
         
         sampled = np.vstack(
@@ -99,7 +108,6 @@ def main():
                 field_name(j): sampled[i][j] for j in range(n_samples)
             }
             doc['raw'] = '{0:064b}'.format(hash_int[i])
-            
             doc_id = random.getrandbits(63)
             
             docs.append('{"index":{"_index": "%s", "_type": "images", "_id": "%d"}})' % (index, doc_id))
@@ -126,4 +134,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    for i in range(1, 10+1):
+        main(i)
