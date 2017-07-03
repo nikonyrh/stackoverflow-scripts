@@ -17,3 +17,6 @@
 !*.sln
 !*.vcxproj
 !*.cu
+
+# Clojure
+!*.clj
