@@ -1,7 +1,5 @@
 import numpy as np
 from hashlib import sha1
-import random
-import json
 import time
 
 dim_in   = 32
@@ -42,13 +40,13 @@ def get_sampler(n_samples, bits_per_sample):
     return result, pow2
 
 
-def main(n_out):
+def main(n_out, fname_number):
     n_batch = min(10000, n_out)
     assert n_out % n_batch == 0
 
     sampler, pow2 = get_sampler(n_samples, b_p_sample)
     
-    with open('numbers.txt', 'w') as f:
+    with open('numbers_%d.txt' % fname_number, 'w') as f:
         for i in range(n_out // n_batch):
             data = np.random.randn(n_batch, dim_in)
             hash = (data.dot(proj) > 0).astype(np.uint64)
@@ -57,7 +55,12 @@ def main(n_out):
             f.write('\n'.join('%d' % j for j in hash_int) + '\n')
 
 
+# Generating 8 files in 2 parallel processes, each generating 1 million lines: 
+# time echo {1..8} | xargs -n1 -P2 python3 generate_to_file.py 1
+
+# Intel 6700K took less than 3 minutes, maybe it would be better
+# to use a binary instead of ASCII format but i'm feeling lazy ;) 
 if __name__ == '__main__':
     import sys
-    main(int(sys.argv[1]) * 1000)
+    main(int(sys.argv[1]) * 1000000, int(sys.argv[2]))
 

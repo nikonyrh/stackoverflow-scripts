@@ -6,30 +6,43 @@
             
             [nikonyrh-utilities-clj.core :as u]))
 
-
 (set! *warn-on-reflection* true)
 
-(defn read-numbers [fname n]
+
+(defn read-numbers [fname]
   (let [; Well this seems a bit stupid way of converting a 64-bit unsigned int to a signed one :o
         max-long (apply * (repeat 63 2N))
         to-long #(long (if (>= % max-long) (- max-long %) %))]
     (with-open [rdr (clojure.java.io/reader fname)]
-      (->> rdr
-           line-seq
-           (take n)
-           (map #(-> % bigint to-long))
+      (->> rdr line-seq (map (fn [^java.lang.String s] (-> s java.math.BigInteger. to-long)))
            long-array))))
 
+; This lazy seq is cached, which makes it faster to extend the test dataset size.
+(def all-hashes
+ (->> "/home/wrecked/projects/stackoverflow-scripts/32785803_es_image_phash/py/"
+       clojure.java.io/file
+       file-seq
+       (map str)
+       (filter (fn [^java.lang.String f] (.endsWith f ".txt")))
+       sort
+       (map read-numbers)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(def n-elems (int 10e6))
+
+; Refer to py/generate_to_file.py on how to generate these files.
 (def hashes-cpu
-  ; Refer to py/generate_to_file.py on how to generate this file
-  (read-numbers "/home/wrecked/projects/stackoverflow-scripts/32785803_es_image_phash/py/numbers.txt" 256))
+  (->> all-hashes
+       (apply concat)
+       (take n-elems)
+       long-array))
 
-(def block-size 32)
-(def n-elems     (count hashes-cpu))
+(assert (= n-elems (count hashes-cpu)))
+
+(def block-size 1024)
 (def matches-cpu (int-array (inc n-elems)))
 (def results-cpu (int-array n-elems))
-(def tmp-cpu     (int-array (/ n-elems 2 block-size)))
+(def tmp-cpu     (int-array (int (Math/ceil (/ n-elems 2 block-size)))))
 
 (cc.core/init)
 (def gpu (cc.core/device 0))
@@ -37,16 +50,17 @@
 
 (comment
   (commons.core/release @ctx)
-  (reset! ctx nil))
+  (reset! ctx nil)
+  "Reset the ctx")
 
-
-(cc.core/in-context @ctx
-  (def hashes-gpu  (cc.core/mem-alloc (* 8 n-elems)))
-  (cc.core/memcpy-host! hashes-cpu hashes-gpu)
-  
-  (def matches-gpu (cc.core/mem-alloc (* 4 (count matches-cpu))))
-  (def results-gpu (cc.core/mem-alloc (* 4 (count results-cpu))))
-  (def tmp-gpu     (cc.core/mem-alloc (* 4 (count tmp-cpu)))))
+(time
+  (cc.core/in-context @ctx
+    (def hashes-gpu  (cc.core/mem-alloc (* 8 n-elems)))
+    (cc.core/memcpy-host! hashes-cpu hashes-gpu)
+    
+    (def matches-gpu (cc.core/mem-alloc (* 4 (count matches-cpu))))
+    (def results-gpu (cc.core/mem-alloc (* 4 (count results-cpu))))
+    (def tmp-gpu     (cc.core/mem-alloc (* 4 (count tmp-cpu))))))
 
 
 (cc.core/in-context @ctx
@@ -132,51 +146,110 @@
      cc.core/program cc.core/compile! cc.core/module (cc.core/function "f1")))
 
   (def fn2
-    (-> "
-      extern \"C\" __global__ void f2(const int n, int *results, int *tmp) {
-        const int
-          i = blockIdx.x * blockDim.x + threadIdx.x,
-          base_value = tmp[blockIdx.x / 2];
+    (-> (str "
+      extern \"C\" __global__ void f2(const int n, const int *hashes, int *matches, const int *cumsum, const int *block_cumsum) {
+        const int i = blockIdx.x * blockDim.x + threadIdx.x;
         
-        if (i < n) {
-          results[i] += base_value;
+        if (i < n && matches[i]) {
+          const int match_ix = cumsum[i] + block_cumsum[blockIdx.x / 2];
+          matches[match_ix] = hashes[i];
+        }
+        
+        if (i >= n - 1 && threadIdx.x == " block-size " - 1) {
+          // Storing the number of matches
+          matches[0] = cumsum[i] + block_cumsum[blockIdx.x / 2];
         }
       }
-    " cc.core/program cc.core/compile! cc.core/module (cc.core/function "f2"))))
+    ")
+     cc.core/program cc.core/compile! cc.core/module (cc.core/function "f2"))))
 
 
+(defn find-matches [target max-dist]
+  (cc.core/in-context @ctx
+    (let [times []
+          
+          times (conj times (System/nanoTime))
+          _ (cc.core/launch! fn1
+              (cc.core/grid-1d (/ n-elems 2) block-size)
+              (cc.core/parameters n-elems hashes-gpu target max-dist matches-gpu results-gpu tmp-gpu))
+          
+          ; _ (do (cc.core/memcpy-host! matches-gpu matches-cpu) (cc.core/memcpy-host! results-gpu results-cpu))]
+          
+          ; TODO: Do all the calculations in CUDA, we can only use at max 1024 threads per block!
+          ; Or maybe loop more on GPU instead of full-fetched multi-kernel cumulative sum implementation.
+          times (conj times (System/nanoTime))
+          _ (cc.core/memcpy-host! tmp-gpu tmp-cpu)
+          
+          times (conj times (System/nanoTime))
+          _ (cc.core/memcpy-host!
+              (->> tmp-cpu (cons 0) (take (/ n-elems 2 block-size)) (reductions +) int-array)
+              tmp-gpu)
+          
+          times (conj times (System/nanoTime))
+          _ (cc.core/launch! fn2
+              (cc.core/grid-1d n-elems block-size)
+              (cc.core/parameters n-elems hashes-gpu matches-gpu results-gpu tmp-gpu))
+          
+          times (conj times (System/nanoTime))
+          _ (cc.core/memcpy-host! matches-gpu matches-cpu 4)                                 ; The number of matches
+          _ (cc.core/memcpy-host! matches-gpu matches-cpu (-> matches-cpu first inc (* 4))) ; The number of matches & hashes themselves
+          times (conj times (System/nanoTime))]
+      [times matches-cpu])))
 
-(cc.core/in-context @ctx
-  (let [target (nth hashes-cpu 3)
-        max-dist 25]
-    (cc.core/launch! fn1
-      (cc.core/grid-1d (/ n-elems 2) block-size)
-      (cc.core/parameters n-elems hashes-gpu target max-dist matches-gpu results-gpu tmp-gpu)))
+
+(comment
+  (def n-tests 1000)
   
-  (cc.core/memcpy-host! matches-gpu matches-cpu)
-; (cc.core/memcpy-host! results-gpu results-cpu)
+  (time
+    (def results
+      (let [max-dist 8] 
+        (->> (for [target (->> (repeatedly #(rand-nth hashes-cpu)) (take n-tests))]
+               (let [[times matches] (find-matches target max-dist)]
+                 (merge
+                   {:n-matches (first matches)}
+                   (let [time-deltas (->> (map - (rest times) times) (map #(* 1e-6 %)))]
+                     (->> time-deltas
+                          (cons (apply + time-deltas))
+                          (zipmap (map (comp keyword str) (repeat "step") (range))))))))
+             vec))))
   
-  ; TODO: Do all the calculations in CUDA, we can only use at max 1024 threads per block!
-  ; Or maybe loop more on GPU instead of full-fetched multi-kernel cumulative sum implementation.
-  (cc.core/memcpy-host! tmp-gpu tmp-cpu)
-  (cc.core/memcpy-host!
-    (->> tmp-cpu (cons 0) (take (/ n-elems 2 block-size)) (reductions +) int-array)
-    tmp-gpu)
+  (first results)
+  
+  
+  (let [fields (-> results first keys sort)
+        ps     (for [p [25 50 75 95]] (-> p (* (dec n-tests) 0.01) Math/round int))]
+    (->> results
+         (map (apply juxt fields))
+         (apply map list)
+         (map #(map (-> % sort vec) ps))
+         (zipmap fields)
+         (merge
+           {:n-elems (* n-elems 1e-6)})
+         pprint)))
 
-  (cc.core/launch! fn2
-    (cc.core/grid-1d n-elems block-size)
-    (cc.core/parameters n-elems results-gpu tmp-gpu))
+
+(comment
+  (->> results
+       (map #(-> % :n-matches (Math/pow 0.25) Math/round (Math/pow 4.0) int))
+       frequencies (into (sorted-map)) pprint)
   
-  (cc.core/memcpy-host! results-gpu results-cpu))
+  (into
+    {:n-elems (* n-elems 1e-6)}
+    (->> results
+         (apply merge-with +)
+         (map (fn [[k v]] [k (-> v (/ n-tests) double)])))))
 
 
 (comment
   (seq matches-cpu)
   (seq results-cpu)
+  (seq hashes-cpu)
   (seq tmp-cpu)
+  
+  (take (first matches-cpu) (rest matches-cpu)))
 
-  (map * matches-cpu
-    (reductions + matches-cpu)))
+  
+    
 
 
 
