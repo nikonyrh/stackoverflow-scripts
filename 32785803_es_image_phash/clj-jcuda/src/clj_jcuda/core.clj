@@ -27,8 +27,11 @@
        sort
        (map read-numbers)))
 
+(cc.core/init)
+(def gpu (cc.core/device 0))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-(def n-elems (int 10e6))
+(def n-elems (int 80e6))
 
 ; Refer to py/generate_to_file.py on how to generate these files.
 (def hashes-cpu
@@ -42,16 +45,16 @@
 (def block-size 1024)
 (def matches-cpu (int-array (inc n-elems)))
 (def results-cpu (int-array n-elems))
-(def tmp-cpu     (int-array (int (Math/ceil (/ n-elems 2 block-size)))))
+(def n-tmp       (int (Math/ceil (/ n-elems 2 block-size))))
+(def tmp-cpu     (int-array n-tmp))
 
-(cc.core/init)
-(def gpu (cc.core/device 0))
+
 (def ctx (atom (context gpu)))
 
 (comment
   (commons.core/release @ctx)
   (reset! ctx nil)
-  "Reset the ctx")
+  "Released the ctx")
 
 (time
   (cc.core/in-context @ctx
@@ -164,11 +167,22 @@
      cc.core/program cc.core/compile! cc.core/module (cc.core/function "f2"))))
 
 
+(defn cumsum! [^ints iarr]
+  (let [n (alength iarr)]
+    (loop [sum 0 i 0]
+      (when (< i n)
+        (let [sum (+ sum (aget iarr i))]
+          (aset iarr i sum)
+          (recur sum (inc i)))))))
+
+  
+
+
 (defn find-matches [target max-dist]
   (cc.core/in-context @ctx
     (let [times []
           
-          times (conj times (System/nanoTime))
+          times (conj times (System/nanoTime)) ; step1
           _ (cc.core/launch! fn1
               (cc.core/grid-1d (/ n-elems 2) block-size)
               (cc.core/parameters n-elems hashes-gpu target max-dist matches-gpu results-gpu tmp-gpu))
@@ -177,23 +191,28 @@
           
           ; TODO: Do all the calculations in CUDA, we can only use at max 1024 threads per block!
           ; Or maybe loop more on GPU instead of full-fetched multi-kernel cumulative sum implementation.
-          times (conj times (System/nanoTime))
+          times (do (cc.core/synchronize!) (conj times (System/nanoTime))) ; step2
           _ (cc.core/memcpy-host! tmp-gpu tmp-cpu)
           
-          times (conj times (System/nanoTime))
-          _ (cc.core/memcpy-host!
-              (->> tmp-cpu (cons 0) (take (/ n-elems 2 block-size)) (reductions +) int-array)
-              tmp-gpu)
+          times (do (cc.core/synchronize!) (conj times (System/nanoTime))) ; step3
+        ; tmp-cumsum-cpu (->> tmp-cpu (cons 0) (take n-tmp) (reductions +) int-array)
+          tmp-cumsum-cpu (->> tmp-cpu (cons 0) (take n-tmp) int-array)
+          _ (cumsum! tmp-cumsum-cpu)
           
-          times (conj times (System/nanoTime))
+          times (conj times (System/nanoTime)) ; step4
+          _ (cc.core/memcpy-host! tmp-cumsum-cpu tmp-gpu)
+          
+          times (do (cc.core/synchronize!) (conj times (System/nanoTime))) ; step5
           _ (cc.core/launch! fn2
               (cc.core/grid-1d n-elems block-size)
               (cc.core/parameters n-elems hashes-gpu matches-gpu results-gpu tmp-gpu))
           
-          times (conj times (System/nanoTime))
+          times (do (cc.core/synchronize!) (conj times (System/nanoTime))) ; step6
           _ (cc.core/memcpy-host! matches-gpu matches-cpu 4)                                 ; The number of matches
           _ (cc.core/memcpy-host! matches-gpu matches-cpu (-> matches-cpu first inc (* 4))) ; The number of matches & hashes themselves
-          times (conj times (System/nanoTime))]
+          times (do (cc.core/synchronize!) (conj times (System/nanoTime)))  ; step7
+          
+          _ nil]
       [times matches-cpu])))
 
 
@@ -221,9 +240,12 @@
     (->> results
          (map (apply juxt fields))
          (apply map list)
-         (map #(map (-> % sort vec) ps))
+         (map #(->> ps
+                   (map (-> % sort vec))
+                   (map (fn [v] (-> v (* 1000.0) Math/round bigdec (* 0.001M) double)))))
          (zipmap fields)
          (merge
+           (sorted-map)
            {:n-elems (* n-elems 1e-6)})
          pprint)))
 
@@ -248,10 +270,55 @@
   
   (take (first matches-cpu) (rest matches-cpu)))
 
+
+(comment
+  (def benchmarks
+    [[:v1 ; Multiple calls to synchronize! adds about 1 ms to the total time.
+      '[{:n-elems 10.0,
+         :n-matches (13569.0 22063.0 35488.0 67179.0),
+         :step0 (2.567 2.659 2.832 3.87),
+         :step1 (1.592 1.603 1.73 2.393),
+         :step2 (0.014 0.017 0.022 0.056),
+         :step3 (0.466 0.473 0.495 0.727),
+         :step4 (0.012 0.014 0.046 0.635),
+         :step5 (0.407 0.437 0.476 0.577),
+         :step6 (0.028 0.037 0.051 0.086)}
+        
+        {:n-elems 20.0,
+         :n-matches (28101.0 44797.0 67210.0 124425.0),
+         :step0 (5.886 6.259 6.856 7.526),
+         :step1 (3.756 3.932 4.546 5.223),
+         :step2 (0.022 0.025 0.047 0.075),
+         :step3 (0.939 0.953 1.099 1.47),
+         :step4 (0.019 0.032 0.066 0.418),
+         :step5 (0.912 0.943 0.963 1.126),
+         :step6 (0.042 0.056 0.078 0.136)}
+        
+        {:n-elems 40.0,
+         :n-matches (54070.0 87549.0 136194.0 249672.0),
+         :step0 (11.37 11.887 12.296 12.885),
+         :step1 (7.13 7.716 8.298 8.54),
+         :step2 (0.034 0.053 0.057 0.087),
+         :step3 (1.882 1.911 2.134 2.697),
+         :step4 (0.028 0.032 0.045 0.082),
+         :step5 (1.72 1.864 1.919 2.607),
+         :step6 (0.065 0.091 0.132 0.222)}
+        
+        {:n-elems 80.0,
+         :n-matches (114772.0 188799.0 290454.0 574165.0),
+         :step0 (24.442 24.972 25.528 26.186),
+         :step1 (16.472 16.584 16.682 16.937),
+         :step2 (0.069 0.071 0.075 0.105),
+         :step3 (3.778 3.828 4.259 5.279),
+         :step4 (0.046 0.052 0.066 0.117),
+         :step5 (3.721 3.873 4.278 5.027),
+         :step6 (0.123 0.172 0.242 0.406)}]]])
   
-    
-
-
-
-
+  
+  (->> benchmarks
+       first second
+       
+       ; Calculating the scan speed in terms of millions of hashes / second
+       (map #(/ (-> % :n-elems)
+                (-> % :step0 (nth 2) (* 1e-3))))))
 
